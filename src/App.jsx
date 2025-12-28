@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { initializeApp } from "firebase/app";
 import {
   getAuth,
@@ -48,6 +49,8 @@ import {
   UserCircle,
   LogIn,
   ShieldCheck,
+  Camera,
+  Loader2,
 } from "lucide-react";
 import {
   PieChart,
@@ -128,8 +131,17 @@ export default function App() {
   const [filterCategory, setFilterCategory] = useState(""); // '' (All) or 'Food', etc.
   const [searchTerm, setSearchTerm] = useState(""); // Search by Place, Address, or ID
 
+  // Gemini AI State
+  const [showScanModal, setShowScanModal] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState(
+    localStorage.getItem("gemini_api_key") || ""
+  );
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState("");
+
   // File Upload Ref
   const fileInputRef = useRef(null);
+  const imageInputRef = useRef(null);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -140,6 +152,7 @@ export default function App() {
     category: "Food",
     paymentType: "Credit Card",
     transactionId: "",
+    reviewLater: false,
   });
 
   // --- Authentication ---
@@ -274,6 +287,7 @@ export default function App() {
       category: "Food",
       paymentType: "Credit Card",
       transactionId: "",
+      reviewLater: false,
     });
     setEditingId(null);
   };
@@ -288,6 +302,7 @@ export default function App() {
       category: expense.category,
       paymentType: expense.paymentType,
       transactionId: expense.transactionId || "",
+      reviewLater: expense.reviewLater || false,
     });
     setEditingId(expense.id);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -352,6 +367,7 @@ export default function App() {
       "Category",
       "Payment Method",
       "Amount",
+      "Review Status",
     ];
     const csvContent = [
       headers.join(","),
@@ -364,6 +380,7 @@ export default function App() {
           e.category,
           e.paymentType,
           e.amount,
+          e.reviewLater ? "Review Later" : "Verified",
         ].join(",")
       ),
     ].join("\n");
@@ -482,6 +499,149 @@ export default function App() {
     };
 
     reader.readAsText(file);
+  };
+
+  // --- Gemini AI Receipt Scanning ---
+  const DAILY_SCAN_LIMIT = 20; // Set your daily limit here
+
+  const handleScanReceipts = async (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    // --- Rate Limiting Check ---
+    const today = new Date().toISOString().split("T")[0];
+    const usageData = JSON.parse(
+      localStorage.getItem("gemini_daily_usage") || "{}"
+    );
+
+    if (usageData.date !== today) {
+      usageData.date = today;
+      usageData.count = 0;
+    }
+
+    if (usageData.count + files.length > DAILY_SCAN_LIMIT) {
+      alert(
+        `Daily limit reached! You have used ${usageData.count}/${DAILY_SCAN_LIMIT} scans today.`
+      );
+      if (imageInputRef.current) imageInputRef.current.value = "";
+      return;
+    }
+    // ---------------------------
+
+    if (!geminiApiKey) {
+      alert("Please enter your Gemini API Key first.");
+      return;
+    }
+
+    // Save key for future use
+    localStorage.setItem("gemini_api_key", geminiApiKey);
+
+    // Update usage count immediately to prevent abuse
+    usageData.count += files.length;
+    localStorage.setItem("gemini_daily_usage", JSON.stringify(usageData));
+
+    setIsScanning(true);
+    setScanStatus(`Processing ${files.length} images...`);
+
+    try {
+      const genAI = new GoogleGenerativeAI(geminiApiKey);
+      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+      // Convert images to Base64
+      const imageParts = await Promise.all(
+        files.map(async (file) => {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const base64Data = reader.result.split(",")[1];
+              resolve({
+                inlineData: {
+                  data: base64Data,
+                  mimeType: file.type,
+                },
+              });
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+        })
+      );
+
+      const prompt = `
+        Analyze these receipt images. Extract the following details for each receipt:
+        - date (YYYY-MM-DD format, use today's date if not found)
+        - amount (number only)
+        - place (merchant name)
+        - address (merchant address if available, else empty string)
+        - category (Choose strictly from: Food, Gas, Repair, Groceries, Utilities, Entertainment, Other)
+        - paymentType (Credit Card, Debit Card, Cash)
+
+        Return ONLY a raw JSON array of objects. Do not include markdown formatting like \`\`\`json.
+      `;
+
+      setScanStatus("Analyzing with Gemini AI...");
+      const result = await model.generateContent([prompt, ...imageParts]);
+      const response = await result.response;
+      const text = response.text();
+      console.log("Gemini Raw Response:", text);
+
+      // Clean up markdown if present
+      const jsonString = text.replace(/```json|```/g, "").trim();
+      let extractedData;
+      try {
+        extractedData = JSON.parse(jsonString);
+      } catch (parseError) {
+        console.error("JSON Parse Error:", parseError);
+        throw new Error(
+          "Failed to parse AI response. See console for details."
+        );
+      }
+
+      if (!Array.isArray(extractedData)) {
+        throw new Error("Invalid response format from AI");
+      }
+
+      setScanStatus(`Saving ${extractedData.length} transactions...`);
+
+      const batch = writeBatch(db);
+      const collectionRef = collection(
+        db,
+        "artifacts",
+        appId,
+        "users",
+        user.uid,
+        "expenses"
+      );
+
+      let addedCount = 0;
+      extractedData.forEach((item) => {
+        if (item.place && item.amount) {
+          const docRef = doc(collectionRef);
+          batch.set(docRef, {
+            date: item.date || new Date().toISOString().split("T")[0],
+            transactionId: generateTransactionId(),
+            place: item.place,
+            address: item.address || "",
+            category: item.category || "Other",
+            paymentType: item.paymentType || "Credit Card",
+            amount: parseFloat(item.amount),
+            createdAt: serverTimestamp(),
+          });
+          addedCount++;
+        }
+      });
+
+      await batch.commit();
+      alert(`Successfully scanned and added ${addedCount} receipts!`);
+      setShowScanModal(false);
+    } catch (err) {
+      console.error("Gemini Scan Error:", err);
+      alert(`Failed to scan receipts: ${err.message}`);
+    } finally {
+      setIsScanning(false);
+      setScanStatus("");
+      if (imageInputRef.current) imageInputRef.current.value = "";
+    }
   };
 
   // --- Derived State & Calculations ---
@@ -648,6 +808,94 @@ export default function App() {
   // --- DASHBOARD ---
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans p-4 md:p-8">
+      {/* --- SCAN MODAL --- */}
+      {showScanModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-6 animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                <Camera className="w-6 h-6 text-indigo-600" />
+                Scan Receipts with AI
+              </h2>
+              <button
+                onClick={() => setShowScanModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-700">
+                  Gemini API Key
+                </label>
+                <input
+                  type="password"
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                  placeholder="Enter your Gemini API Key"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
+                />
+                <p className="text-xs text-slate-500">
+                  Your key is saved locally in your browser. Get one from{" "}
+                  <a
+                    href="https://aistudio.google.com/app/apikey"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-indigo-600 hover:underline"
+                  >
+                    Google AI Studio
+                  </a>
+                  .
+                </p>
+              </div>
+
+              <div className="border-2 border-dashed border-slate-200 rounded-xl p-8 text-center hover:bg-slate-50 transition-colors relative">
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  ref={imageInputRef}
+                  onChange={handleScanReceipts}
+                  disabled={isScanning || !geminiApiKey}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
+                />
+                {isScanning ? (
+                  <div className="flex flex-col items-center gap-3">
+                    <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
+                    <p className="text-sm font-medium text-indigo-600">
+                      {scanStatus}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-2">
+                    <div className="bg-indigo-50 p-3 rounded-full">
+                      <Upload className="w-6 h-6 text-indigo-600" />
+                    </div>
+                    <p className="text-sm font-medium text-slate-700">
+                      Click to upload receipt images
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      Supports JPG, PNG, WEBP
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowScanModal(false)}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg text-sm font-medium transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-6xl mx-auto space-y-6">
         {/* Header */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -1076,6 +1324,29 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Review Later Checkbox */}
+                  <div className="flex items-center gap-2 py-2">
+                    <input
+                      type="checkbox"
+                      id="reviewLater"
+                      name="reviewLater"
+                      checked={formData.reviewLater}
+                      onChange={(e) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          reviewLater: e.target.checked,
+                        }))
+                      }
+                      className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
+                    />
+                    <label
+                      htmlFor="reviewLater"
+                      className="text-sm text-slate-700 font-medium cursor-pointer"
+                    >
+                      Mark for Review Later
+                    </label>
+                  </div>
+
                   <button
                     type="submit"
                     className={`w-full font-medium py-3 rounded-lg shadow-sm hover:shadow-md transition-all flex items-center justify-center gap-2 mt-2 
@@ -1181,6 +1452,15 @@ export default function App() {
                       Import CSV
                     </button>
 
+                    {/* Scan Receipts Button */}
+                    <button
+                      onClick={() => setShowScanModal(true)}
+                      className="flex items-center justify-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-100 text-sm font-medium rounded-lg hover:bg-indigo-100 transition-colors whitespace-nowrap flex-1 xl:flex-initial"
+                    >
+                      <Camera className="w-4 h-4" />
+                      Scan Receipts
+                    </button>
+
                     {/* Export Button */}
                     <button
                       onClick={handleExport}
@@ -1240,6 +1520,8 @@ export default function App() {
                             className={`transition-colors group ${
                               editingId === expense.id
                                 ? "bg-amber-50"
+                                : expense.reviewLater
+                                ? "bg-yellow-50 hover:bg-yellow-100"
                                 : "hover:bg-slate-50"
                             }`}
                           >
@@ -1300,6 +1582,45 @@ export default function App() {
                             {/* Actions */}
                             <td className="px-6 py-4 text-right align-top">
                               <div className="flex justify-end gap-2">
+                                <button
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    const newStatus = !expense.reviewLater;
+                                    try {
+                                      await updateDoc(
+                                        doc(
+                                          db,
+                                          "artifacts",
+                                          appId,
+                                          "users",
+                                          user.uid,
+                                          "expenses",
+                                          expense.id
+                                        ),
+                                        {
+                                          reviewLater: newStatus,
+                                        }
+                                      );
+                                    } catch (err) {
+                                      console.error(
+                                        "Error updating status:",
+                                        err
+                                      );
+                                    }
+                                  }}
+                                  className={`p-1 transition-colors ${
+                                    expense.reviewLater
+                                      ? "text-yellow-500 hover:text-yellow-600"
+                                      : "text-slate-300 hover:text-yellow-500"
+                                  }`}
+                                  title={
+                                    expense.reviewLater
+                                      ? "Mark as Verified"
+                                      : "Mark for Review"
+                                  }
+                                >
+                                  <AlertCircle className="w-4 h-4" />
+                                </button>
                                 <button
                                   onClick={() => handleEdit(expense)}
                                   className="text-slate-300 hover:text-amber-500 transition-colors p-1"
