@@ -6,8 +6,6 @@
 
 ---
 
-## 👋 Welcome
-
 This Expense Tracker is designed to help you log your daily spending effortlessly. Whether you want to manually enter transactions or use our advanced AI to scan your receipts, keeping track of your money has never been easier.
 
 ## ✨ Key Features
