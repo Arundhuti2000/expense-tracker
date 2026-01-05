@@ -568,15 +568,32 @@ export default function App() {
       );
 
       const prompt = `
-        Analyze these receipt images. Extract the following details for each receipt:
-        - date (YYYY-MM-DD format, use today's date if not found)
-        - amount (number only)
-        - place (merchant name)
-        - address (merchant address if available, else empty string)
-        - category (Choose strictly from: Food, Gas, Repair, Groceries, Utilities, Entertainment, Other)
-        - paymentType (Credit Card, Debit Card, Cash)
+        Analyze the provided receipt image(s) and extract the following data fields. Return the output as a structured JSON array of objects.
+
+        Fields to extract for each receipt:
+        1. "date": Format as YYYY-MM-DD. If not visible, return null.
+        2. "transaction_id": The invoice, reference, or sequence number. If not visible, return null.
+        3. "amount": The total amount paid (numeric value only). If not visible, return null.
+        4. "merchant": The name of the place or merchant. If not visible, return null.
+        5. "address": The street address, city, state, and zip if visible. If not visible, return null.
+        6. "category": Categorize strictly into one of these: [Food, Gas, Repair, Groceries, Utilities, Entertainment, Other]. If unclear, return "Other".
+        7. "payment_method": E.g., Credit Card, Cash, Visa, Debit Card, etc. If not visible, return null.
+
+        If a field is not visible, return null.
 
         Return ONLY a raw JSON array of objects. Do not include markdown formatting like \`\`\`json.
+        Example format:
+        [
+          {
+            "date": "2026-01-05",
+            "transaction_id": "INV-12345",
+            "amount": 45.99,
+            "merchant": "Joe's Coffee Shop",
+            "address": "123 Main St, Springfield, IL 62701",
+            "category": "Food",
+            "payment_method": "Credit Card"
+          }
+        ]
       `;
 
       setScanStatus("Analyzing with Gemini AI...");
@@ -615,15 +632,20 @@ export default function App() {
 
       let addedCount = 0;
       extractedData.forEach((item) => {
-        if (item.place && item.amount) {
+        // Only add if we have at least merchant and amount
+        if (
+          item.merchant &&
+          item.amount !== null &&
+          item.amount !== undefined
+        ) {
           const docRef = doc(collectionRef);
           batch.set(docRef, {
             date: item.date || new Date().toISOString().split("T")[0],
-            transactionId: generateTransactionId(),
-            place: item.place,
+            transactionId: item.transaction_id || generateTransactionId(),
+            place: item.merchant,
             address: item.address || "",
             category: item.category || "Other",
-            paymentType: item.paymentType || "Credit Card",
+            paymentType: item.payment_method || "Credit Card",
             amount: parseFloat(item.amount),
             createdAt: serverTimestamp(),
           });
