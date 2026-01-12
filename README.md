@@ -23,7 +23,7 @@ This Expense Tracker is designed to help you log your daily spending effortlessl
 
 When you open the app, you can choose to **Sign in with Google** (recommended for long-term use) or **Continue as Guest**.
 
-- _Note: Guest data is stored temporarily. For permanent storage, please sign in._
+For permanent storage, please sign in._
 
 ### 2. Adding an Expense
 
