@@ -10,7 +10,7 @@ This Expense Tracker is designed to help you log your daily spending effortlessl
 
 ## ✨ Key Features
 
-- **🤖 AI Receipt Scanning:** Don't like typing? Just take a picture of your receipt! Our integrated Gemini AI will read the date, amount, and store details for you.
+- **🤖 AI Receipt Scanning:** Don't like typing? Just take a picture of your receipt! Our integrated Gemini AI will read the date, amount, and store details for you. 20 images per day limit is present.
 - **📊 Visual Insights:** See exactly where your money goes with beautiful interactive charts.
 - **🏷️ Smart Categorization:** The app learns from common store names (like "Lowe's" or "Whole Foods") to automatically categorize your spending.
 - **🔒 Secure & Flexible:**
